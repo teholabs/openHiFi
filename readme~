@@ -4,8 +4,6 @@ teholabs.com
 
 The goal of the openHiFi is to provide an open hardware music player for the home.
 
-The target for this branch of openHiFi is the Procyon development board (LM3S9B9x Cortex M3)
-
 The hardware is designed to be modular.
 
 The firmware for openHiFi is based on a variety of sources and therefore there are several licenses involved.
