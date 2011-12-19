@@ -1,0 +1,15 @@
+#start toolchain settings
+#COMPORT should be COMx or /dev/ttyUSBx or similar for windows and linux respectivly
+COMPORT = /dev/ttyS3
+SERIALPROG = 0
+WINDOWS = 0
+
+#Use forward slashes for the paths
+#DIR_STELLARISWARE is typically C:/Users/USERNAME/Development/StellarisWare or /home/USERNAME/Development/StellarisWare
+DIR_STELLARISWARE = /home/babryce/Development/StellarisWare
+DIR_DRIVERLIB = $(DIR_STELLARISWARE)/driverlib
+DIR_USBLIB = $(DIR_STELLARISWARE)/usblib
+DIR_UTILS = $(DIR_STELLARISWARE)/utils
+
+##end toolchain settings
+

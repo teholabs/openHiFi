@@ -1,0 +1,20 @@
+openHiFi
+teho Labs/B. A. Bryce
+teholabs.com
+
+The goal of the openHiFi is to provide an open hardware music player for the home.
+
+The hardware is designed to be modular.
+
+The firmware for openHiFi is based on a variety of sources and therefore there are several licenses involved.
+
+Part of the ffmpeg library is linked to which is LGPL.
+StellarisWare is used which forbids making the entire program GPL, but allows linking to LGPL.
+Chan's FatFS and xprintf have a MIT like license. 
+The rest of the code is MIT licensed.
+
+Change Log:
+
+V0.01:
+Initial release support for playing FLAC and WAV files at 44.1 KHz, 16-bit
+commands are only "ls" and "p <filePath>" over 115K serial
