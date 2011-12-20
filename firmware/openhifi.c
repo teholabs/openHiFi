@@ -76,6 +76,20 @@ Please see project readme for more details on licenses
 //It should be set to the largest value it ever needs to be (currently FLAC defined)
 #define decoderScatchSize MAX_FRAMESIZE + MAX_BLOCKSIZE*8
 
+//Size in bytes for interupt character buffers
+#define charLineSize 128
+#define UARTRxBufferSize charLineSize
+
+
+//CommandList:
+#define NO_COMMAND 0
+#define BAD_COMMAND 1
+#define PLAY_COMMAND 2
+#define LS_COMMAND 3
+#define BUILD_COMMAND 4
+#define PLAY_QUEUE_COMMAND 5
+#define ADVANCE_COMMAND 6
+
 //********************************************
 //************ Prototype Functions ***********
 //********************************************
@@ -86,6 +100,7 @@ void myDelay(unsigned long delay);
 void strToUppercase(char * string);
 void SysTickIntHandler(void);
 static FRESULT scan_files(char* path);
+static FRESULT buildFileIndex (char* path, FIL* openFile);
 
 //*********** Audio related ***********
 void I2SintHandler(void);
@@ -164,12 +179,27 @@ tUSBMode g_currentUSBmode;
 
 //*********** Audio Vars *********** 
 
+//Structure for holding file info
+typedef struct
+{
+	char path[charLineSize];
+	char title[charLineSize];
+	char artist[charLineSize];
+	char album[charLineSize];
+	char general[charLineSize];
+} trackInfo;
+
+
+//pointer to SDRAM location of current track info structure
+trackInfo g_currentTrackInfo;
+
 //These are the pointers to buffers used for waveOUT (double buffered)
 static volatile unsigned short *g_waveBufferA;
 static volatile unsigned short *g_waveBufferB;
 
 //g_playFlag is used to indicate if playing and which buffer is being read
 volatile short g_playFlag = 0;
+volatile short g_endPlayBack = 0;
 
 //g_bufferFlag is used to indicate which buffers are full of data
 volatile short g_bufferFlag = 0;
@@ -188,6 +218,7 @@ static unsigned char g_decoderScratch[decoderScatchSize];
 FATFS g_FatFs;
 DIR g_dirInfo;
 FILINFO g_fileInfo;
+FIL g_file1;
 
 //Used for ls command
 DWORD g_acc_size;		
@@ -200,12 +231,64 @@ WORD g_acc_files, g_acc_dirs;
 unsigned long g_sysTickSoftCount;
 
 //char array for reading commands on UART, etc
-char lineBuffer [128] = "";
+char g_UART0RxBuffer[UARTRxBufferSize] = "";
+unsigned char g_UART0RxBufferIndex = 0;
 
+int g_command = NO_COMMAND;
+char g_commandBuffer[UARTRxBufferSize];
+long g_advanceReverse = 0;
 
 //**********************************
 //*********** Functions  *********** 
 //**********************************
+
+void processCommand(char * commandBuffer)
+{
+	int length;
+	char* command;
+	g_endPlayBack = 1;
+
+	//p <filePath> => plays filePath file
+	if(commandBuffer[0] == 'p' && commandBuffer[1] == ' ')
+	{
+		command = &g_UART0RxBuffer[2];				
+		length = strlen(command);
+		strToUppercase(command);
+		strcpy(g_commandBuffer, command);
+		g_command = PLAY_COMMAND;
+	}
+	else if(commandBuffer[0] == 'l' && commandBuffer[1] == 's')
+	{	
+		command = &g_UART0RxBuffer[2];
+		if(command[0] == ' ')command = &g_UART0RxBuffer[3];
+		strcpy(g_commandBuffer, command);
+		g_command = LS_COMMAND;
+	}
+	else if(commandBuffer[0] == 'b')
+	{
+		command = &g_UART0RxBuffer[1];
+		if(command[0] == ' ')command = &g_UART0RxBuffer[2];
+		strcpy(g_commandBuffer, command);
+		g_command = BUILD_COMMAND;
+
+	}
+	else if(commandBuffer[0] == 'p'&& commandBuffer[1] == 'q')
+	{
+		g_advanceReverse = 0;		
+		g_command = PLAY_QUEUE_COMMAND;
+	}
+	else if(commandBuffer[0] == 'a'&& commandBuffer[1] == ' ')
+	{
+		char * convert;
+		convert = &g_UART0RxBuffer[2];
+		xatoi(&convert, &g_advanceReverse);	
+		g_command = ADVANCE_COMMAND;
+	}
+	else g_command = BAD_COMMAND;
+
+
+}
+
 
 int main(void)
 {
@@ -235,23 +318,115 @@ int main(void)
 			{
 				xprintf("Drive Mounted\n");
 				//It worked to say the drive is ready								
-				g_usbDeviceState = DEVICE_READY;	
+				g_usbDeviceState = DEVICE_READY;
+				xprintf("> ");	
 				
 			}
 
 		}
+
+		else if(g_usbDeviceState == DEVICE_READY)			
+		{
+			int length;
+			UINT s1;
+
+			switch(g_command)
+			{
+				case PLAY_COMMAND:			
+				length = strlen(g_commandBuffer);				
+				xprintf("play: %s extension: %s\n", g_commandBuffer, &g_commandBuffer[length-3]);
+				if(memcmp(&g_commandBuffer[length-3], "FLA", 3) == 0)
+				{
+					playFLAC(g_commandBuffer,g_decoderScratch, decoderScatchSize);
+				}
+				else if(memcmp(&g_commandBuffer[length-3], "WAV", 3) == 0)
+				{					
+					playWAV(g_commandBuffer,g_decoderScratch, decoderScatchSize);
+				}
+				xprintf("> ");
+				g_command = NO_COMMAND;
+				break;
+			
+				case LS_COMMAND:
+				scan_files(g_commandBuffer);
+				xprintf("> ");
+				g_command = NO_COMMAND;
+				break;
+				
+				case BUILD_COMMAND:
+				f_open(&g_file1, "index.txt", FA_CREATE_ALWAYS | FA_WRITE);
+				buildFileIndex(g_commandBuffer, &g_file1);
+				f_close(&g_file1);
+				xprintf("> ");
+				g_command = NO_COMMAND;
+				break;
+
+				case PLAY_QUEUE_COMMAND:
+				f_open(&g_file1, "index.txt", FA_OPEN_EXISTING | FA_READ);
+				f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+				while(s1 > 0)
+				{					
+					length = strlen(g_currentTrackInfo.path);				
+					xprintf("play: %s extension: %s\n", g_currentTrackInfo.path, &g_currentTrackInfo.path[length-3]);				if(g_advanceReverse != 0)
+					{
+						//correct offset						
+						g_advanceReverse-=2;						
+						while(g_advanceReverse != 0)
+						{					
+							if(g_advanceReverse > 0)
+							{
+								g_advanceReverse--;
+								f_lseek(&g_file1, g_file1.fptr + sizeof(g_currentTrackInfo));
+							}
+							else
+							{
+								g_advanceReverse++;
+								f_lseek(&g_file1, g_file1.fptr - sizeof(g_currentTrackInfo));
+							}
+						}
+					}
+					else if(memcmp(&g_currentTrackInfo.path[length-3], "FLA", 3) == 0)
+					{
+						playFLAC(g_currentTrackInfo.path,g_decoderScratch, decoderScatchSize);
+					}
+					else if(memcmp(&g_currentTrackInfo.path[length-3], "WAV", 3) == 0)
+					{					
+						playWAV(g_currentTrackInfo.path,g_decoderScratch, decoderScatchSize);
+					}
+					f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+				}
+				f_close(&g_file1);
+				break;
+				
+				case BAD_COMMAND:
+				xprintf("> ");
+				g_command = NO_COMMAND;
+				break;
+				
+				case NO_COMMAND:
+				default:
+				break;
+
+			}
+
+
+		}
+
+/*
 		//If the drive is attached and mounted then take input and do commands
 		else if(g_usbDeviceState == DEVICE_READY)
 		{
+
+
 			int length;
 			char* filePath;
-			xprintf("> ");
-			xgets(lineBuffer, sizeof(lineBuffer));
 			
+			g_commandFlag = 0;
+			//xgets(g_UART0RxBuffer, sizeof(g_UART0RxBuffer));			
 			//p <filePath> => plays filePath file
-			if(lineBuffer[0] == 'p' && lineBuffer[1] == ' ')
+			if(g_UART0RxBuffer[0] == 'p' && g_UART0RxBuffer[1] == ' ')
 			{
-				filePath = &lineBuffer[2];				
+				filePath = &g_UART0RxBuffer[2];				
 				length = strlen(filePath);
 				strToUppercase(filePath);
 				xprintf("play %s %s\n", filePath, &filePath[length-3]);
@@ -264,17 +439,19 @@ int main(void)
 					playWAV(filePath,g_decoderScratch, decoderScatchSize);
 				}
 			}
-			else if(lineBuffer[0] == 'l' && lineBuffer[1] == 's')
+			else if(g_UART0RxBuffer[0] == 'l' && g_UART0RxBuffer[1] == 's')
 			{
 				char* path;				
-				path = &lineBuffer[2];
-				if(path[0] == ' ')path = &lineBuffer[3];		
+				path = &g_UART0RxBuffer[2];
+				if(path[0] == ' ')path = &g_UART0RxBuffer[3];
+				put_dump(path, 0, 100, sizeof(char));		
 				scan_files(path);
 			}
+			xprintf("> ");
 			
 			
 		}
-
+*/
 		//Update the Host controller state machine
 		USBHCDMain();
     	}
@@ -387,6 +564,7 @@ int playWAV(char filePath[], unsigned char * scratchMemory, unsigned long scratc
 	unsigned long readSize;
 
 	Buff = scratchMemory;
+	g_endPlayBack = 0;
 	
 	if(scratchLength < 4096)
 	{
@@ -403,7 +581,7 @@ int playWAV(char filePath[], unsigned char * scratchMemory, unsigned long scratc
 	//Read Header
 	res = f_read(&file1, Buff, 44, &s1);
 
-	if(s1 > 0)
+	if(s1 > 0 )
 	{
 		do
 		{
@@ -411,7 +589,7 @@ int playWAV(char filePath[], unsigned char * scratchMemory, unsigned long scratc
 			res = f_read(&file1, Buff, readSize, &s1);     // Read a chunk of src file
 			waveOut(Buff, s1, 16);
 	
-		} while(res || s1 != 0);
+		} while((res || s1 != 0) && g_endPlayBack != 1);
 	}	
 
 	f_close(&file1);	
@@ -529,22 +707,90 @@ int parceFLACmetadata(char filePath[], FLACContext* context)
 			context->bps = (((metaDataChunk[12] & 0x01) << 4) | ((metaDataChunk[13] & 0xf0)>>4) ) + 1;
 			
 			//This field in FLAC context is limited to 32-bits
-			context->totalsamples = (metaDataChunk[14] << 24) | (metaDataChunk[15] << 16) | (metaDataChunk[16] << 8) | metaDataChunk[17];	
-			
-			//If it is longer than 32-bits warn at least this is why things are bad
-			if(metaDataChunk[18] &  0xF0)
-			{
-				xprintf("Warning: Sample number read error\n");
-			}
+			context->totalsamples = (metaDataChunk[14] << 24) | (metaDataChunk[15] << 16) | (metaDataChunk[16] << 8) | metaDataChunk[17];
 
 			
 
 		}
-		//TODO handle other metadata other than STREAMINFO
+		//Vorbis comment
+		else if((metaDataChunk[0] & 0x7F) == 4)
+		{
+			unsigned long fieldLength, commentListLength;			
+			unsigned long readCount;
+			unsigned long totalReadCount = 0;
+			unsigned long currentCommentNumber = 0;
+			int readAmount;
+
+			f_read(&FLACfile, &fieldLength, 4, &s1);
+			totalReadCount +=s1;
+
+			//Read vendor info
+			readCount = 0;
+			readAmount = 128;
+			while(readCount < fieldLength)
+			{
+				if(fieldLength-readCount < readAmount) readAmount = fieldLength-readCount;
+				if(readAmount> metaDataBlockLength-totalReadCount)
+				{
+					xprintf("Malformed metadata aborting\n");
+					f_close(&FLACfile);
+					return 1;
+				
+				}
+				f_read(&FLACfile, metaDataChunk, readAmount, &s1);
+				readCount += s1;
+				totalReadCount +=s1;
+				//terminate the string								
+				metaDataChunk[s1] = '\0';
+				xprintf("%s\n",metaDataChunk);
+
+			}
+
+			f_read(&FLACfile, &commentListLength, 4, &s1);
+			totalReadCount +=s1;
+
+			while(currentCommentNumber < commentListLength)
+			{
+				f_read(&FLACfile, &fieldLength, 4, &s1);
+				totalReadCount +=s1;
+				readCount = 0;
+				readAmount = 128;
+				while(readCount < fieldLength)
+				{
+					if(fieldLength-readCount < readAmount) readAmount = fieldLength-readCount;
+					if(readAmount> metaDataBlockLength-totalReadCount)
+					{
+						xprintf("Malformed metadata aborting\n");
+						f_close(&FLACfile);
+						return 1;
+					
+					}
+					f_read(&FLACfile, metaDataChunk, readAmount, &s1);
+					readCount += s1;
+					totalReadCount +=s1;
+					//terminate the string
+					metaDataChunk[s1] = '\0';
+					xprintf("%s\n",metaDataChunk);
+
+				}
+				currentCommentNumber++;
+			}
+
+			if(f_lseek(&FLACfile, FLACfile.fptr + metaDataBlockLength-totalReadCount) != FR_OK)
+			{
+				xprintf("File Seek Failed\n");
+				f_close(&FLACfile);
+				return 1;
+			}
+
+
+		}
+		//TODO handle other metadata
 		else
 		{
 			if(f_lseek(&FLACfile, FLACfile.fptr + metaDataBlockLength) != FR_OK)
 			{
+				xprintf("File Seek Failed\n");
 				f_close(&FLACfile);
 				return 1;
 			}
@@ -601,7 +847,8 @@ int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratc
 	decodedSamplesLeft = (int32_t*) &bytePointer[MAX_FRAMESIZE];
 	decodedSamplesRight = (int32_t*) &bytePointer[MAX_FRAMESIZE+4*MAX_BLOCKSIZE];
 
-	
+	g_endPlayBack = 0;
+
 	//Get the metadata we need to play the file
 	if(parceFLACmetadata(filePath, &context) != 0)
 	{
@@ -680,6 +927,7 @@ int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratc
 		//add however many were read
 		bytesLeft += s1;
 
+		if(g_endPlayBack)break;
 	}
 
 	f_close(&FLACfile);
@@ -718,6 +966,10 @@ void configureHW(void)
 	ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);		//Enable USART 0
 	ROM_UARTConfigSetExpClk(UART0_BASE, ROM_SysCtlClockGet(), 115200, (UART_CONFIG_PAR_NONE | UART_CONFIG_STOP_ONE | UART_CONFIG_WLEN_8)); 
 	ROM_UARTEnable(UART0_BASE);
+
+	//Interupt for UART0 receiveing
+	ROM_IntEnable(INT_UART0);
+	ROM_UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
 
 	//Functions for xprintf
 	xfunc_out = std_putchar;
@@ -838,10 +1090,11 @@ void configureHW(void)
 	g_pusEPISdram = (unsigned short *)0x60000000;
 	g_waveBufferA = &g_pusEPISdram[0];
 	g_waveBufferB = &g_pusEPISdram[waveBufferSize];
+	//g_currentTrackInfo = (trackInfo *) &g_pusEPISdram[waveBufferSize*2];
 
 
 	//*********** I2S ***********
-	unsigned long ulSampleRate;
+	unsigned long sampleRate;
 	
 	//Enable the ports (some maybe on already but be safe)
 	ROM_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
@@ -869,7 +1122,7 @@ void configureHW(void)
 	I2SMasterClockSelect(I2S0_BASE, I2S_TX_MCLK_INT);
 
 	//The master clock rate should be 256 (16*16) * sample rate
-	ulSampleRate = SysCtlI2SMClkSet(0, 44100 * 16 * 16);
+	sampleRate = SysCtlI2SMClkSet(0, 44100 * 16 * 16);
 	
 	//Set the configuration of the I2S output (Master)
 	//Compact stereo allows the FIFO to store both L/R at the same time (FIFO = 32 bit)
@@ -889,7 +1142,7 @@ void configureHW(void)
 	I2STxEnable(I2S0_BASE);
 
 	//Turn on interupts in general
-	//IntMasterEnable();
+	ROM_IntMasterEnable();
 
 
 }
@@ -967,13 +1220,58 @@ void SysTickIntHandler(void)
 }
 
 
+void UART0IntHandler(void)
+{
+	unsigned long UART0Status;
+	char tempChar;
+
+	// Get the interrrupt status
+	UART0Status = ROM_UARTIntStatus(UART0_BASE, true);
+
+
+	// Clear the pending interrupts
+	ROM_UARTIntClear(UART0_BASE, UART0Status);
+
+	// Loop while there are characters in the receive FIFO.
+	while(ROM_UARTCharsAvail(UART0_BASE))
+	{
+		tempChar = ROM_UARTCharGetNonBlocking(UART0_BASE);		
+		
+		//return marks end of line
+		if(tempChar == '\r')
+		{
+			//terminate the string			
+			g_UART0RxBuffer[g_UART0RxBufferIndex] = '\0';
+			//new line for screen
+			xputc('\n');
+			//process the command		
+			processCommand(g_UART0RxBuffer);
+			//reset the buffer
+			g_UART0RxBufferIndex = 0;
+		}
+		//if backspace go back a char
+		else if(tempChar == '\b' && g_UART0RxBufferIndex)
+		{
+			g_UART0RxBufferIndex--;
+			xputc(tempChar);
+		}
+		//if printable and will fit
+		else if(tempChar >= ' ' && g_UART0RxBufferIndex < UARTRxBufferSize-1)
+		{
+			g_UART0RxBuffer[g_UART0RxBufferIndex++] = tempChar;
+			xputc(tempChar);
+		}
+	}
+}
+
+
 void I2SintHandler(void)
 {
 	unsigned long I2Sstatus, I2Ssamples;
 
 	I2Sstatus = I2SIntStatus(I2S0_BASE, true);
 
-	// Clear the pending interrupts.
+	// Clear the pending interrupts
 
 	I2SIntClear(I2S0_BASE, I2Sstatus);
 	
@@ -1101,12 +1399,72 @@ static FRESULT scan_files (
 #endif
 			if (g_fileInfo.fattrib & AM_DIR) {
 				g_acc_dirs++;
+				xprintf("%s/%s\n", path, fn);
+				// The next 4 lines does recursive calling (if desired)
+				//*(path+i) = '/'; strcpy(path+i+1, fn);
+				//res = scan_files(path);
+				//*(path+i) = '\0';
+				//if (res != FR_OK) break;
+				
+			} else {
+				xprintf("%s/%s\n", path, fn);
+				g_acc_files++;
+				g_acc_size += g_fileInfo.fsize;
+			}
+		}
+	}
+
+	return res;
+}
+
+
+
+//Builds up the file metadata for files to play
+static FRESULT buildFileIndex (char* path, FIL* openFile)
+{
+	DIR dirs;
+	FRESULT res;
+	int i;
+	char *fn;
+	UINT s1;
+	int length;
+
+	res = f_opendir(&dirs, path);
+	//put_rc(res);
+	if (res == FR_OK) {
+		i = strlen(path);
+		while (((res = f_readdir(&dirs, &g_fileInfo)) == FR_OK) && g_fileInfo.fname[0]) {
+			if (_FS_RPATH && g_fileInfo.fname[0] == '.') continue;
+#if _USE_LFN
+			fn = *g_fileInfo.lfname ? g_fileInfo.lfname : g_fileInfo.fname;
+#else
+			fn = g_fileInfo.fname;
+#endif
+			if (g_fileInfo.fattrib & AM_DIR) {
+				g_acc_dirs++;
 				*(path+i) = '/'; strcpy(path+i+1, fn);
-				res = scan_files(path);
+				res = buildFileIndex(path, openFile);
 				*(path+i) = '\0';
 				if (res != FR_OK) break;
 			} else {
-				xprintf("%s/%s\n", path, fn);
+				xprintf("%s/%s\n", path, fn);				
+				strcpy(g_currentTrackInfo.path, path);
+				strcat(g_currentTrackInfo.path, "/");
+				strcat(g_currentTrackInfo.path, fn);			
+				
+				length = strlen(g_currentTrackInfo.path);				
+				if(memcmp(&g_currentTrackInfo.path[length-3], "FLA", 3) == 0)
+				{
+					FLACContext context;
+					parceFLACmetadata(g_currentTrackInfo.path, &context);
+					f_write(openFile, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+				}
+				else if(memcmp(&g_currentTrackInfo.path[length-3], "WAV", 3) == 0)
+				{					
+					f_write(openFile, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+				}
+
+							
 				g_acc_files++;
 				g_acc_size += g_fileInfo.fsize;
 			}
