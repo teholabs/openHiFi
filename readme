@@ -17,6 +17,13 @@ The rest of the code is MIT licensed.
 
 Change Log:
 
+V0.02:
+Added Vorbis Comment parcing
+Added File Info Structure
+Added File Index Build Function
+Changed ls
+Added interupt driven commands
+
 V0.01:
 Initial release support for playing FLAC and WAV files at 44.1 KHz, 16-bit
 commands are only "ls" and "p <filePath>" over 115K serial
