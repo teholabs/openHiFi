@@ -17,6 +17,13 @@ The rest of the code is MIT licensed.
 
 Change Log:
 
+V0.04
+Added primative gapless for FLAC (works most of the time Abbey Road -> gapless test)
+Added test link-list indexing (~20s for ~5000 files (song A-Z only))
+
+V0.03:
+Changed Metadata outputs
+
 V0.02:
 Added Vorbis Comment parcing
 Added File Info Structure

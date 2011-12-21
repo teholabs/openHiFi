@@ -89,6 +89,7 @@ Please see project readme for more details on licenses
 #define BUILD_COMMAND 4
 #define PLAY_QUEUE_COMMAND 5
 #define ADVANCE_COMMAND 6
+#define SONGLIST_COMMAND 7
 
 //********************************************
 //************ Prototype Functions ***********
@@ -105,7 +106,7 @@ static FRESULT buildFileIndex (char* path, FIL* openFile);
 //*********** Audio related ***********
 void I2SintHandler(void);
 int playWAV(char filePath[], unsigned char * scratchMemory, unsigned long scratchLength);
-int playFLAC(char filePath[], unsigned char * scratchMemory, unsigned long scratchLength);
+int playFLAC(char filePath[], unsigned char * scratchMemory, unsigned long scratchLength, int gapless);
 void waveOut(void *Buffer, unsigned long numberOfBytes, unsigned int sampleSize);
 
 //*********** xprintf related ***********
@@ -189,6 +190,35 @@ typedef struct
 	char general[charLineSize];
 } trackInfo;
 
+//A songlist is just an array of indexes into the master index file
+
+
+typedef struct librarySongNode_s
+{
+	struct librarySongNode_s* next;
+	struct librarySongNode_s* previous;
+	char title[charLineSize]; 
+	unsigned long songIndex;
+
+} librarySongNode;
+
+typedef struct libraryAlbumNode_s
+{
+	struct libraryAlbumNode_s* next;
+	struct libraryAlbumNode_s* previous;
+	librarySongNode trackList;
+
+} libraryAlbumNode;
+
+typedef struct libraryArtist_s
+{
+	struct libraryArtist_s* next;
+	struct libraryArtist_s* previous;
+	libraryAlbumNode recordingList;
+	librarySongNode trackList;
+
+} libraryArtistNode;
+
 
 //pointer to SDRAM location of current track info structure
 trackInfo g_currentTrackInfo;
@@ -196,6 +226,13 @@ trackInfo g_currentTrackInfo;
 //These are the pointers to buffers used for waveOUT (double buffered)
 static volatile unsigned short *g_waveBufferA;
 static volatile unsigned short *g_waveBufferB;
+
+//Pointers for accessing the library
+static volatile unsigned short *g_libraryDataBase;
+static volatile unsigned short *g_libraryDataCurrent;
+static volatile libraryArtistNode *g_libraryDataArtistHead;
+static volatile libraryAlbumNode *g_libraryDataAlbumHead;
+librarySongNode *g_libraryDataSongHead;
 
 //g_playFlag is used to indicate if playing and which buffer is being read
 volatile short g_playFlag = 0;
@@ -238,10 +275,247 @@ int g_command = NO_COMMAND;
 char g_commandBuffer[UARTRxBufferSize];
 long g_advanceReverse = 0;
 
+char g_searchString[charLineSize];
 //**********************************
 //*********** Functions  *********** 
 //**********************************
 
+void displayTrackInfo(trackInfo * currentInfo)
+{
+	xprintf("Artist: %s\nAlbum: %s\nTitle: %s\nTrack Number: %d\nFile Path: %s\n", currentInfo->artist, currentInfo->album, currentInfo->title, currentInfo->general[0], currentInfo->path);
+
+
+}
+void getTrackInfo(unsigned long index)
+{
+	UINT s1;	
+	f_open(&g_file1, "index.txt", FA_OPEN_EXISTING | FA_READ);
+	f_lseek(&g_file1, g_file1.fptr + (sizeof(g_currentTrackInfo)*(index-1)));
+	f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+	f_close(&g_file1);
+
+}
+
+//Indexing will start from 1 into file!!!
+//This allows us to know if it is pointing to nothing
+
+void addTrackToSongList(librarySongNode * songListHead, unsigned long trackIndex)
+{
+	librarySongNode *currentSongNode, *nextNode, *previousNode;
+	currentSongNode = songListHead;
+	unsigned long seekAmount = 1;
+	unsigned long seekInteration = 0;
+	unsigned long listLength = 0;
+	
+	//xprintf("D");
+	getTrackInfo(trackIndex);
+	strcpy(g_searchString, g_currentTrackInfo.title);
+	strToUppercase(g_searchString);
+
+	while(currentSongNode->next != NULL)
+	{
+		listLength++;
+		currentSongNode = currentSongNode->next;
+	}
+	currentSongNode = songListHead;
+
+	//xprintf("A %d ", listLength);
+	
+	int count = 0;
+
+	//inital starting point is in the middle of the list
+	seekAmount = listLength/2;
+
+	while(count< seekAmount)
+	{
+		if(currentSongNode->next == NULL)break;		
+		currentSongNode = currentSongNode->next;
+		count++;
+	}
+	count = 0;
+	
+	if(currentSongNode->songIndex != 0)
+	{
+		//getTrackInfo(currentSongNode->songIndex);
+		//strToUppercase(g_currentTrackInfo.title);
+
+		//basically a binary search
+		do		
+		{
+			if(strcmp(g_searchString, currentSongNode->title) > 0)
+			{
+				seekInteration = 0;				
+				while(seekInteration < seekAmount)
+				{
+					if(currentSongNode->next == NULL)
+					{
+						seekAmount = seekInteration/2;
+						break;
+					}
+					currentSongNode = currentSongNode->next;
+					seekInteration++;
+				}
+				//getTrackInfo(currentSongNode->songIndex);
+				//strToUppercase(g_currentTrackInfo.title);
+				//xprintf("a %d", seekAmount);
+				//seekAmount *= 2;
+				//if(!(strcmp(g_searchString, g_currentTrackInfo.title) > 0))
+				seekAmount /= 2;
+			}
+			else
+			{
+				//seekAmount /= 4;
+				seekInteration = 0;				
+				while(seekInteration < seekAmount)
+				{
+					if(currentSongNode->previous == NULL)
+					{
+						seekAmount = seekInteration/2;
+						break;
+					}
+					currentSongNode = currentSongNode->previous;
+					seekInteration++;
+				}
+				//getTrackInfo(currentSongNode->songIndex);
+				//strToUppercase(g_currentTrackInfo.title);
+				//xprintf("c %d", seekAmount);
+				//seekAmount *= 2;
+				//if(seekAmount>2)seekAmount -= 2;
+				//if(strcmp(g_searchString, g_currentTrackInfo.title) > 0)
+				seekAmount /= 2;
+			}			
+			
+			count++;
+		}while(seekAmount);
+
+		//xprintf("%dB", count);
+		//seek backward
+		while(strcmp(g_searchString, currentSongNode->title) < 0)
+		{
+			if(currentSongNode->previous == NULL)break;
+			currentSongNode = currentSongNode->previous;
+			//getTrackInfo(currentSongNode->songIndex);
+			//strToUppercase(g_currentTrackInfo.title);
+			//xprintf("@");			
+		}
+
+		//seek forward
+		while(strcmp(g_searchString, currentSongNode->title) > 0)
+		{
+			//xprintf("!");
+			if(currentSongNode->next == NULL)break;
+			currentSongNode = currentSongNode->next;
+			//getTrackInfo(currentSongNode->songIndex);
+			//strToUppercase(g_currentTrackInfo.title);			
+		}
+		//Normal case is to insert before current node
+		//only not done when reached the end of list
+		if(currentSongNode->next != NULL)
+		{
+			
+			nextNode = currentSongNode;
+			previousNode = currentSongNode->previous;
+			if(currentSongNode == g_libraryDataSongHead)
+			{
+				currentSongNode = (librarySongNode*) g_libraryDataCurrent;
+				g_libraryDataSongHead = currentSongNode;
+			}
+			else currentSongNode = (librarySongNode*) g_libraryDataCurrent;
+
+			//move the memory pointer to the next free spot
+			g_libraryDataCurrent = (unsigned short *) &(currentSongNode[1]);
+
+			//Clear the memory in case the RAM is holding old data
+			memset(currentSongNode, 0, sizeof(librarySongNode));
+
+
+			//insert node
+			if(previousNode != NULL)
+			{
+				previousNode->next = currentSongNode;
+			}
+			if(nextNode != NULL)
+			{			
+				nextNode->previous = currentSongNode;
+			}
+			currentSongNode->next = nextNode;
+			currentSongNode->previous = previousNode;
+
+			//add the trackIndex
+			currentSongNode->songIndex = trackIndex;
+			strcpy(currentSongNode->title, g_searchString);
+
+		}
+		else
+		{
+
+			nextNode = currentSongNode->next;
+			previousNode = currentSongNode;
+			currentSongNode = (librarySongNode*) g_libraryDataCurrent;
+
+			//move the memory pointer to the next free spot
+			g_libraryDataCurrent = (unsigned short *) &(currentSongNode[1]);
+
+			//Clear the memory in case the RAM is holding old data
+			memset(currentSongNode, 0, sizeof(librarySongNode));
+
+
+			//insert node
+			if(previousNode != NULL)
+			{
+				previousNode->next = currentSongNode;
+			}
+			if(nextNode != NULL)
+			{			
+				nextNode->previous = currentSongNode;
+			}
+			currentSongNode->next = nextNode;
+			currentSongNode->previous = previousNode;
+
+			//add the trackIndex
+			currentSongNode->songIndex = trackIndex;
+			strcpy(currentSongNode->title, g_searchString);
+		}
+
+	}
+	//Nothing in list yet
+	else
+	{
+		//add the trackIndex
+		currentSongNode->songIndex = trackIndex;
+		strcpy(currentSongNode->title, g_searchString);
+		g_libraryDataCurrent = (unsigned short *) &(currentSongNode[1]);
+	}
+
+	//xprintf("*");
+
+}
+
+
+
+
+
+
+void printSongList(librarySongNode * songListHead)
+{
+	librarySongNode* currentSongNode;
+	currentSongNode = songListHead;
+	while(currentSongNode->next != NULL)
+	{
+		//getTrackInfo(currentSongNode->songIndex);
+		//displayTrackInfo(&g_currentTrackInfo);
+		xprintf("%s\n", currentSongNode->title);
+		currentSongNode = currentSongNode->next;
+	}
+	getTrackInfo(currentSongNode->songIndex);
+	displayTrackInfo(&g_currentTrackInfo);
+}
+
+
+
+//Helper function takes string commandBuffer and sets the global command (g_command)
+//The command is handled in the main state machine
+//TODO change to int and refuse commands if there is command waiting
 void processCommand(char * commandBuffer)
 {
 	int length;
@@ -257,6 +531,7 @@ void processCommand(char * commandBuffer)
 		strcpy(g_commandBuffer, command);
 		g_command = PLAY_COMMAND;
 	}
+	//ls <path> lists files/dirs in <path>
 	else if(commandBuffer[0] == 'l' && commandBuffer[1] == 's')
 	{	
 		command = &g_UART0RxBuffer[2];
@@ -264,6 +539,7 @@ void processCommand(char * commandBuffer)
 		strcpy(g_commandBuffer, command);
 		g_command = LS_COMMAND;
 	}
+	//(b)uilds file index into index.txt in root of drive
 	else if(commandBuffer[0] == 'b')
 	{
 		command = &g_UART0RxBuffer[1];
@@ -272,11 +548,16 @@ void processCommand(char * commandBuffer)
 		g_command = BUILD_COMMAND;
 
 	}
+	//plays the current queue
 	else if(commandBuffer[0] == 'p'&& commandBuffer[1] == 'q')
 	{
 		g_advanceReverse = 0;		
 		g_command = PLAY_QUEUE_COMMAND;
 	}
+	//a <x> (number) goes <x>+1 tracks on current play queue
+	//EG: a 0 -> next track
+	//EG: a -1 restarts current track
+	//EG: a 99 advances 100 tracks (including current track)
 	else if(commandBuffer[0] == 'a'&& commandBuffer[1] == ' ')
 	{
 		char * convert;
@@ -284,6 +565,12 @@ void processCommand(char * commandBuffer)
 		xatoi(&convert, &g_advanceReverse);	
 		g_command = ADVANCE_COMMAND;
 	}
+
+	else if(commandBuffer[0] == 's')
+	{	
+		g_command = SONGLIST_COMMAND;
+	}
+	//everything else is bad
 	else g_command = BAD_COMMAND;
 
 
@@ -324,11 +611,15 @@ int main(void)
 			}
 
 		}
-
+		//We are here in normal player mode handles commands without interupting interupts
 		else if(g_usbDeviceState == DEVICE_READY)			
 		{
 			int length;
 			UINT s1;
+
+
+			unsigned long songCount;
+			unsigned long songIndex = 1;
 
 			switch(g_command)
 			{
@@ -337,7 +628,7 @@ int main(void)
 				xprintf("play: %s extension: %s\n", g_commandBuffer, &g_commandBuffer[length-3]);
 				if(memcmp(&g_commandBuffer[length-3], "FLA", 3) == 0)
 				{
-					playFLAC(g_commandBuffer,g_decoderScratch, decoderScatchSize);
+					playFLAC(g_commandBuffer,g_decoderScratch, decoderScatchSize, 0);
 				}
 				else if(memcmp(&g_commandBuffer[length-3], "WAV", 3) == 0)
 				{					
@@ -365,12 +656,13 @@ int main(void)
 				f_open(&g_file1, "index.txt", FA_OPEN_EXISTING | FA_READ);
 				f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
 				while(s1 > 0)
-				{					
+				{	
+					displayTrackInfo(&g_currentTrackInfo);				
 					length = strlen(g_currentTrackInfo.path);				
 					xprintf("play: %s extension: %s\n", g_currentTrackInfo.path, &g_currentTrackInfo.path[length-3]);				if(g_advanceReverse != 0)
 					{
 						//correct offset						
-						g_advanceReverse-=2;						
+						g_advanceReverse-=1;						
 						while(g_advanceReverse != 0)
 						{					
 							if(g_advanceReverse > 0)
@@ -387,7 +679,7 @@ int main(void)
 					}
 					else if(memcmp(&g_currentTrackInfo.path[length-3], "FLA", 3) == 0)
 					{
-						playFLAC(g_currentTrackInfo.path,g_decoderScratch, decoderScatchSize);
+						playFLAC(g_currentTrackInfo.path,g_decoderScratch, decoderScatchSize, 1);
 					}
 					else if(memcmp(&g_currentTrackInfo.path[length-3], "WAV", 3) == 0)
 					{					
@@ -396,6 +688,27 @@ int main(void)
 					f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
 				}
 				f_close(&g_file1);
+				break;
+
+				case SONGLIST_COMMAND:
+
+				g_libraryDataSongHead = (librarySongNode *) g_libraryDataCurrent;
+
+				//Make sure the inital node is blank
+				memset(g_libraryDataSongHead, 0, sizeof(librarySongNode));
+
+				f_open(&g_file1, "index.txt", FA_OPEN_EXISTING | FA_READ);
+				songCount = f_size(&g_file1)/sizeof(g_currentTrackInfo);
+				f_close(&g_file1);
+
+				while(songIndex <= songCount)
+				{
+					addTrackToSongList(g_libraryDataSongHead, songIndex);
+					songIndex++;
+				}
+				printSongList(g_libraryDataSongHead);
+				xprintf("> ");
+				g_command = NO_COMMAND;
 				break;
 				
 				case BAD_COMMAND:
@@ -412,46 +725,6 @@ int main(void)
 
 		}
 
-/*
-		//If the drive is attached and mounted then take input and do commands
-		else if(g_usbDeviceState == DEVICE_READY)
-		{
-
-
-			int length;
-			char* filePath;
-			
-			g_commandFlag = 0;
-			//xgets(g_UART0RxBuffer, sizeof(g_UART0RxBuffer));			
-			//p <filePath> => plays filePath file
-			if(g_UART0RxBuffer[0] == 'p' && g_UART0RxBuffer[1] == ' ')
-			{
-				filePath = &g_UART0RxBuffer[2];				
-				length = strlen(filePath);
-				strToUppercase(filePath);
-				xprintf("play %s %s\n", filePath, &filePath[length-3]);
-				if(memcmp(&filePath[length-3], "FLA", 3) == 0)
-				{
-					playFLAC(filePath,g_decoderScratch, decoderScatchSize);
-				}
-				else if(memcmp(&filePath[length-3], "WAV", 3) == 0)
-				{
-					playWAV(filePath,g_decoderScratch, decoderScatchSize);
-				}
-			}
-			else if(g_UART0RxBuffer[0] == 'l' && g_UART0RxBuffer[1] == 's')
-			{
-				char* path;				
-				path = &g_UART0RxBuffer[2];
-				if(path[0] == ' ')path = &g_UART0RxBuffer[3];
-				put_dump(path, 0, 100, sizeof(char));		
-				scan_files(path);
-			}
-			xprintf("> ");
-			
-			
-		}
-*/
 		//Update the Host controller state machine
 		USBHCDMain();
     	}
@@ -622,8 +895,9 @@ int parceFLACmetadata(char filePath[], FLACContext* context)
 	UINT s1 = 0;
 	FIL FLACfile;
 	int metaDataFlag = 1;
-	unsigned char metaDataChunk[128];	
+	char metaDataChunk[128];	
 	unsigned long metaDataBlockLength = 0;
+	char* tagContents;
 
 
 	if(f_open(&FLACfile, filePath, FA_READ) != FR_OK)
@@ -742,12 +1016,13 @@ int parceFLACmetadata(char filePath[], FLACContext* context)
 				totalReadCount +=s1;
 				//terminate the string								
 				metaDataChunk[s1] = '\0';
-				xprintf("%s\n",metaDataChunk);
+				//xprintf("%s\n",metaDataChunk);
 
 			}
 
 			f_read(&FLACfile, &commentListLength, 4, &s1);
 			totalReadCount +=s1;
+
 
 			while(currentCommentNumber < commentListLength)
 			{
@@ -770,7 +1045,37 @@ int parceFLACmetadata(char filePath[], FLACContext* context)
 					totalReadCount +=s1;
 					//terminate the string
 					metaDataChunk[s1] = '\0';
-					xprintf("%s\n",metaDataChunk);
+					
+					//Make another with just contents
+					tagContents = strchr(metaDataChunk, '=');
+					tagContents[0] = '\0';
+					tagContents = &tagContents[1];
+					strToUppercase(metaDataChunk);
+
+					//xprintf("%s: %s\n",metaDataChunk, tagContents);
+			
+					if(strcmp(metaDataChunk, "ARTIST") == 0)
+					{		
+						strcpy(g_currentTrackInfo.artist, tagContents);
+					}
+					else if(strcmp(metaDataChunk, "TITLE") == 0)
+					{	
+						strcpy(g_currentTrackInfo.title, tagContents);
+					}
+					else if(strcmp(metaDataChunk, "ALBUM") == 0)
+					{		
+						strcpy(g_currentTrackInfo.album, tagContents);
+					}
+					//Uses general feild first character
+					else if(strcmp(metaDataChunk, "TRACKNUMBER") == 0)
+					{	
+						long long_trackNumber;
+						char trackNumber;
+						xatoi(&tagContents, &long_trackNumber);
+						trackNumber = (char) long_trackNumber;
+						g_currentTrackInfo.general[0] = trackNumber;					
+						
+					}					
 
 				}
 				currentCommentNumber++;
@@ -824,7 +1129,7 @@ void yield()
 }
 
 //FLAC decoder
-int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratchLength) 
+int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratchLength, int gapless) 
 {
 	FIL FLACfile;
 	UINT bytesLeft, bytesUsed, s1;
@@ -877,9 +1182,13 @@ int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratc
 
 	//Fill up fileChunk completely (MAX_FRAMSIZE = valid size of memory fileChunk points to)
 	f_read(&FLACfile, fileChunk, MAX_FRAMESIZE, &bytesLeft);
-
-	g_playFlag = 0;
-	g_bufferFlag = 0;
+	
+	//If not gapless or playing first track
+	if(gapless == 0 || g_playFlag == 0)
+	{
+		g_playFlag = 0;
+		g_bufferFlag = 0;
+	}
 
 	while (bytesLeft) 
 	{
@@ -932,19 +1241,22 @@ int playFLAC(char filePath[], unsigned char* scratchMemory, unsigned long scratc
 
 	f_close(&FLACfile);
 
-	//Clear the buffers
-	int i1;
+	if(gapless == 0 || g_endPlayBack)
+	{
+		//Clear the buffers
+		int i1;
 
-	for(i1=0; i1 < 4096; i1++)
-	{
-		fileChunk[i1] = 0;
+		for(i1=0; i1 < 4096; i1++)
+		{
+			fileChunk[i1] = 0;
+		}
+		for(i1=0; i1 <=waveBufferSize*4; i1 += 4096)
+		{
+			waveOut(fileChunk, 4096, 16);
+		}
+		g_playFlag = 0;
+		g_waveBufferIndex = 0;
 	}
-	for(i1=0; i1 <=waveBufferSize*4; i1 += 4096)
-	{
-		waveOut(fileChunk, 4096, 16);
-	}
-	g_playFlag = 0;
-	g_waveBufferIndex = 0;
 
 	return 0;
 }
@@ -1090,7 +1402,12 @@ void configureHW(void)
 	g_pusEPISdram = (unsigned short *)0x60000000;
 	g_waveBufferA = &g_pusEPISdram[0];
 	g_waveBufferB = &g_pusEPISdram[waveBufferSize];
+	
 	//g_currentTrackInfo = (trackInfo *) &g_pusEPISdram[waveBufferSize*2];
+
+	//libraryData (always should be at the top of the SDRAM)
+	g_libraryDataBase = &g_pusEPISdram[waveBufferSize*2];
+	g_libraryDataCurrent = g_libraryDataBase;
 
 
 	//*********** I2S ***********
@@ -1447,7 +1764,12 @@ static FRESULT buildFileIndex (char* path, FIL* openFile)
 				*(path+i) = '\0';
 				if (res != FR_OK) break;
 			} else {
-				xprintf("%s/%s\n", path, fn);				
+				xprintf("%s/%s\n", path, fn);
+
+				//clear the dataStructure for writing
+				memset(&g_currentTrackInfo, 0, sizeof(g_currentTrackInfo));
+
+				//Add path info		
 				strcpy(g_currentTrackInfo.path, path);
 				strcat(g_currentTrackInfo.path, "/");
 				strcat(g_currentTrackInfo.path, fn);			
@@ -1461,6 +1783,10 @@ static FRESULT buildFileIndex (char* path, FIL* openFile)
 				}
 				else if(memcmp(&g_currentTrackInfo.path[length-3], "WAV", 3) == 0)
 				{					
+					strcpy(g_currentTrackInfo.title, "UNKNOWN");
+					strcpy(g_currentTrackInfo.artist, "UNKNOWN");
+					strcpy(g_currentTrackInfo.album, "UNKNOWN");
+					g_currentTrackInfo.general[0] = 0;		
 					f_write(openFile, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
 				}
 
