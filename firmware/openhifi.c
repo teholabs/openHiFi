@@ -90,6 +90,8 @@ Please see project readme for more details on licenses
 #define PLAY_QUEUE_COMMAND 5
 #define ADVANCE_COMMAND 6
 #define SONGLIST_COMMAND 7
+#define SEARCH_PLAY_COMMAND 8
+#define END_QUEUE_COMMAND 9
 
 //********************************************
 //************ Prototype Functions ***********
@@ -293,6 +295,24 @@ void getTrackInfo(unsigned long index)
 	f_lseek(&g_file1, g_file1.fptr + (sizeof(g_currentTrackInfo)*(index-1)));
 	f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
 	f_close(&g_file1);
+
+}
+
+//looks though all file names for the closest alphabetic match and returns file index
+unsigned long searchSongs(librarySongNode * songListHead, char* searchString)
+{
+	librarySongNode *currentSongNode;
+	currentSongNode = songListHead;
+
+	strToUppercase(searchString);
+	xprintf("searching...\n");
+	while(strcmp(searchString, currentSongNode->title) > 0)
+	{
+		if(currentSongNode->next == NULL) break;
+		currentSongNode = currentSongNode->next;
+	}
+
+	return currentSongNode->songIndex;
 
 }
 
@@ -507,8 +527,9 @@ void printSongList(librarySongNode * songListHead)
 		xprintf("%s\n", currentSongNode->title);
 		currentSongNode = currentSongNode->next;
 	}
-	getTrackInfo(currentSongNode->songIndex);
-	displayTrackInfo(&g_currentTrackInfo);
+	xprintf("%s\n", currentSongNode->title);
+	//getTrackInfo(currentSongNode->songIndex);
+	//displayTrackInfo(&g_currentTrackInfo);
 }
 
 
@@ -551,7 +572,18 @@ void processCommand(char * commandBuffer)
 	//plays the current queue
 	else if(commandBuffer[0] == 'p'&& commandBuffer[1] == 'q')
 	{
-		g_advanceReverse = 0;		
+		char * convert;
+		long temp = 1;
+		if(commandBuffer[2] == ' ')
+		{
+			convert = &g_UART0RxBuffer[3];
+			if(xatoi(&convert, &temp) == 0 || temp < 1)
+			{
+				temp = 1;
+			}
+		}
+		temp--;
+		g_advanceReverse = temp;		
 		g_command = PLAY_QUEUE_COMMAND;
 	}
 	//a <x> (number) goes <x>+1 tracks on current play queue
@@ -565,10 +597,24 @@ void processCommand(char * commandBuffer)
 		xatoi(&convert, &g_advanceReverse);	
 		g_command = ADVANCE_COMMAND;
 	}
-
-	else if(commandBuffer[0] == 's')
+	else if(commandBuffer[0] == 's' && (commandBuffer[1] == ' ' || commandBuffer[1] == '\0'))
 	{	
 		g_command = SONGLIST_COMMAND;
+	}
+
+	//sp <searchString> plays the closest track to the search string
+	else if(commandBuffer[0] == 's' && commandBuffer[1] == 'p')
+	{	
+		command = &g_UART0RxBuffer[2];
+		if(command[0] == ' ')command = &g_UART0RxBuffer[3];
+		strcpy(g_commandBuffer, command);
+		g_command = SEARCH_PLAY_COMMAND;
+	}
+
+	//ends playing the current queue
+	else if(commandBuffer[0] == 'e'&& commandBuffer[1] == 'q')
+	{		
+		g_command = END_QUEUE_COMMAND;
 	}
 	//everything else is bad
 	else g_command = BAD_COMMAND;
@@ -619,7 +665,7 @@ int main(void)
 
 
 			unsigned long songCount;
-			unsigned long songIndex = 1;
+			unsigned long songIndex;
 
 			switch(g_command)
 			{
@@ -653,6 +699,7 @@ int main(void)
 				break;
 
 				case PLAY_QUEUE_COMMAND:
+				songIndex = 1;
 				f_open(&g_file1, "index.txt", FA_OPEN_EXISTING | FA_READ);
 				f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
 				while(s1 > 0)
@@ -686,12 +733,17 @@ int main(void)
 						playWAV(g_currentTrackInfo.path,g_decoderScratch, decoderScatchSize);
 					}
 					f_read(&g_file1, &g_currentTrackInfo, sizeof(g_currentTrackInfo), &s1);
+
+					//end queue?
+					if(g_command == END_QUEUE_COMMAND)break;
 				}
 				f_close(&g_file1);
+				xprintf("> ");				
+				g_command = NO_COMMAND;
 				break;
 
 				case SONGLIST_COMMAND:
-
+				songIndex = 1;
 				g_libraryDataSongHead = (librarySongNode *) g_libraryDataCurrent;
 
 				//Make sure the inital node is blank
@@ -709,6 +761,16 @@ int main(void)
 				printSongList(g_libraryDataSongHead);
 				xprintf("> ");
 				g_command = NO_COMMAND;
+				break;
+
+				case SEARCH_PLAY_COMMAND:
+				songIndex = searchSongs(g_libraryDataSongHead, g_commandBuffer);
+				xprintf("Song Index: %d\n", songIndex);
+				getTrackInfo(songIndex);
+				displayTrackInfo(&g_currentTrackInfo);
+				strcpy(g_commandBuffer, g_currentTrackInfo.path);
+				//xprintf("> ");
+				g_command = PLAY_COMMAND;
 				break;
 				
 				case BAD_COMMAND:

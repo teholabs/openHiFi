@@ -17,6 +17,12 @@ The rest of the code is MIT licensed.
 
 Change Log:
 
+V0.05
+Primative play track via search
+Added index to play queue (pq) command
+Added end playing queue (eq) command
+Starting to get messy again, needs cleanup/comments
+
 V0.04
 Added primative gapless for FLAC (works most of the time Abbey Road -> gapless test)
 Added test link-list indexing (~20s for ~5000 files (song A-Z only))
